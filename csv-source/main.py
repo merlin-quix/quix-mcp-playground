@@ -1,108 +1,118 @@
-# Import the Quix Streams modules for interacting with Kafka:
-from quixstreams import Application
-from quixstreams.models.serializers.quix import JSONSerializer, SerializationContext
-
-# (see https://quix.io/docs/quix-streams/v2-0-latest/api-reference/quixstreams.html for more details)
-
-# Import additional modules as needed
-import pandas as pd
-import random
-import time
 import os
+import time
+from datetime import datetime
+from quixstreams import Application
 
-# for local dev, load env vars from a .env file
-from dotenv import load_dotenv
-load_dotenv()
+# Set environment variables
+# For deployed applications, these will be set via the Quix platform
+# For local development, you can set them here or in a .env file
+if "Quix__Sdk__Token" not in os.environ:
+    os.environ["Quix__Sdk__Token"] = "sdk-8310f429a0b34c03b7f684d8409502bf"
 
-# Create an Application
-app = Application(consumer_group="csv_sample", auto_create_topics=True)
-# Define a serializer for messages, using JSON Serializer for ease
-serializer = JSONSerializer()
+# Use environment variable for input topic, fallback to cnc-data
+input_topic_name = os.environ.get("input", "cnc-data")
 
-# Define the topic using the "output" environment variable
-topic_name = os.environ["output"]
-topic = app.topic(topic_name)
-
-# Get the directory of the current script
-script_dir = os.path.dirname(os.path.realpath(__file__))
-# Construct the path to the CSV file
-csv_file_path = os.path.join(script_dir, "demo-data.csv")
-
-
-
-# this function loads the file and sends each row to the publisher
-def read_csv_file(file_path: str):
+def create_consumer_application():
     """
-    A function to read data from a CSV file in an endless manner.
-    It returns a generator with stream_id and rows
+    Create and configure the Quix Streams consumer application
     """
+    # Create a unique consumer group based on current time to avoid conflicts
+    consumer_group = f"cnc-consumer-{int(time.time())}"
+    
+    print(f"Creating Quix Streams consumer application...")
+    print(f"Consumer Group: {consumer_group}")
+    print(f"Topic: {input_topic_name}")
+    print(f"Will process messages with stop condition\n")
+    
+    # Create the Application
+    app = Application(
+        broker_address=None,  # Quix Cloud doesn't need broker address
+        consumer_group=consumer_group,
+        auto_offset_reset="earliest"  # Start from the beginning
+    )
+    
+    return app
 
-    # Read the CSV file into a pandas.DataFrame
-    print("CSV file loading.")
-    df = pd.read_csv(file_path)
-    print("File loaded.")
-
-    # Get the number of rows in the dataFrame for printing out later
-    row_count = len(df)
-
-    # Generate a unique ID for this data stream.
-    # It will be used as a message key in Kafka
-    stream_id = f"CSV_DATA_{str(random.randint(1, 100)).zfill(3)}"
-
-    # Get the column headers as a list
-    headers = df.columns.tolist()
-
-    # Continuously loop over the data
-    while True:
-        # Print a message to the console for each iteration
-        print(f"Publishing {row_count} rows.")
-
-        # Iterate over the rows and convert them to
-        for _, row in df.iterrows():
-            # Create a dictionary that includes both column headers and row values
-            row_data = {header: row[header] for header in headers}
-
-            # add a new timestamp column with the current data and time
-            row_data["Timestamp"] = time.time_ns()
-
-            # Yield the stream ID and the row data
-            yield stream_id, row_data
-
-        print("All rows published")
-
-        # Wait a moment before outputting more data.
-        time.sleep(1)
-
+def process_cnc_data():
+    """
+    Main function to process CNC data from Kafka topic
+    """
+    app = create_consumer_application()
+    
+    # Define the input topic
+    input_topic = app.topic(input_topic_name)
+    
+    # Create a streaming dataframe
+    sdf = app.dataframe(input_topic)
+    
+    # Message counter for stopping condition
+    message_count = 0
+    max_messages = 100  # Stop after 100 messages for safety
+    
+    def process_message(message):
+        nonlocal message_count
+        message_count += 1
+        
+        # Extract key information from CNC data
+        program_name = message.get('programName', 'Unknown')
+        spindle_speed = message.get('spindleActualSpeed', 0)
+        spindle_temp = message.get('spindleTemp', 0)
+        active_tool = message.get('activeToolID', 'Unknown')
+        z_axis_power = message.get('axisZDrivePower', 0)
+        timestamp_s = message.get('timestamp_s', 0)
+        
+        print(f"Message {message_count}:")
+        print(f"  Program: {program_name}")
+        print(f"  Spindle Speed: {spindle_speed} RPM")
+        print(f"  Spindle Temp: {spindle_temp}°C")
+        print(f"  Active Tool: {active_tool}")
+        print(f"  Z-Axis Power: {z_axis_power}")
+        print(f"  Timestamp: {timestamp_s}s")
+        print("-" * 50)
+        
+        # Stop after reaching max messages to prevent infinite consumption
+        if message_count >= max_messages:
+            print(f"Reached {max_messages} messages. Stopping for safety...")
+            app.stop()
+        
+        return message
+    
+    # Apply the processing function
+    sdf = sdf.apply(process_message)
+    
+    print("Starting CNC data consumer...")
+    print("=" * 60)
+    
+    try:
+        # Run the application
+        app.run()
+        print(f"\nConsumer stopped after processing {message_count} messages.")
+    except KeyboardInterrupt:
+        print(f"\nConsumer interrupted by user after {message_count} messages.")
+    except Exception as e:
+        print(f"\nError occurred: {e}")
+        print(f"Processed {message_count} messages before error.")
 
 def main():
     """
-    Read data from the CSV file and publish it to Kafka
+    Main entry point for the CNC data consumer application
     """
-
-    # Create a pre-configured Producer object.
-    # Producer is already setup to use Quix brokers.
-    # It will also ensure that the topics exist before producing to them if
-    # Application.Quix is initiliazed with "auto_create_topics=True".
-    producer = app.get_producer()
-
-    with producer:
-        # Iterate over the data from CSV file
-        for message_key, row_data in read_csv_file(file_path=csv_file_path):
-            # Serialize row value to bytes
-            serialized_value = serializer(
-                value=row_data, ctx=SerializationContext(topic=topic.name)
-            )
-
-            # publish the data to the topic
-            producer.produce(
-                topic=topic.name,
-                key=message_key,
-                value=serialized_value,
-            )
-
+    print("CNC Data Consumer Application")
+    print("============================")
+    print(f"Input Topic: {input_topic_name}")
+    print(f"SDK Token: {'***' + os.environ.get('Quix__Sdk__Token', '')[-4:] if os.environ.get('Quix__Sdk__Token') else 'Not set'}")
+    print()
+    
+    try:
+        process_cnc_data()
+    except Exception as e:
+        print(f"Application error: {e}")
+        raise
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("Exiting.")
+        print("\nExiting due to user interrupt.")
+    except Exception as e:
+        print(f"Fatal error: {e}")
