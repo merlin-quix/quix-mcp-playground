@@ -24,3 +24,4 @@ deployments:
 # This section describes the Topics of the data pipeline
 topics:
   - name: cnc-data
+  - name: cnc-data-downsampled
