@@ -25,3 +25,4 @@ deployments:
 topics:
   - name: cnc-data
   - name: cnc-data-downsampled
+  - name: cursor-test
