@@ -60,7 +60,9 @@ def post_data_without_key():
     data = request.json
     logger.debug(f"{data}")
 
-    producer.produce(topic.name, json.dumps(data))
+    # Extract location from the data to use as key
+    location = data.get("location", "unknown")
+    producer.produce(topic.name, json.dumps(data), location.encode())
 
     # Return a normal 200 response; CORS headers are added automatically by Flask-CORS 
     return Response(status=200)
